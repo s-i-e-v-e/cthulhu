@@ -106,13 +106,13 @@ export function yEncDecode(encoded: Uint8Array) {
 }
 
 async function readResponse(conn: Deno.Conn, codes: number[], isMultiline: boolean, isCompressed: boolean = false): Promise<NNTPResponse> {
-    const p = new Uint8Array(32);
+    const p = new Uint8Array(2);
     let xs = new Uint8Array(32);
     let i = 0;
     for (;;) {
         const n = i;
         if (isMultiline) {
-            if (n >= 5 && xs[n-5] === 0x0D && xs[n-4] === 0x0A && xs[n-3] === 0x2E && xs[n-2] === 0x0D && xs[n-1] === 0x0A) {
+            if (n >= 5 && xs[n-3] === 0x2E && xs[n-5] === 0x0D && xs[n-4] === 0x0A && xs[n-2] === 0x0D && xs[n-1] === 0x0A) {
                 xs = xs.subarray(0, n-5);
                 break;
             }
@@ -126,10 +126,8 @@ async function readResponse(conn: Deno.Conn, codes: number[], isMultiline: boole
         const nn = await conn.read(p);
         if (!nn) break;
 
-        for (let j = 0; j < nn; j++) {
-            xs[i] = p[j];
-            i += 1;
-        }
+        xs.set(p.subarray(0, nn), i);
+        i += nn;
         if (nn < p.byteLength) break;
 
         if (i >= xs.byteLength) {
@@ -142,17 +140,19 @@ async function readResponse(conn: Deno.Conn, codes: number[], isMultiline: boole
 
     const a = xs.indexOf(0x0D);
     const x = de.decode(xs.subarray(0, a));
+    if (isMultiline && xs.byteLength <= a+2) throw new Error(`${xs.byteLength}:${x}`);
+    xs = xs.subarray(a+2);
+    if (!isMultiline && xs.byteLength) throw new Error(`${xs.byteLength}:${x}`);
     const v: NNTPResponse = {
         code: Number(x.substring(0, 3)),
         message: x.substring(3).trim(),
-        data: isMultiline && xs.byteLength > a+2 ? xs.subarray(a+2, xs.byteLength) : undefined,
+        data: isMultiline ? xs : undefined,
     };
-    if (!codes.filter(x => x === v.code).length) throw new Error(`Expected: one of ${codes.join(',')}. Found: ${v.code}`);
+    if (!codes.filter(x => x === v.code).length) throw new Error(`Expected: one of ${codes.join(',')}. Found: ${v.code} (${x})`);
     if (!isMultiline) return v;
     if (!v.data) throw new Error();
 
     if (isCompressed) {
-        const n = xs.byteLength;
         if (v.data[0] === 0x78 && v.data[1] === 0x1) {
             v.data = unzlib(v.data);
         }
@@ -266,7 +266,6 @@ export async function nntp_connect() {
     };
 }
 
-const Debug = true;
 export async function nntp_test() {
     const c = await nntp_connect();
     await nntp_auth(c);
