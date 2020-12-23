@@ -33,6 +33,7 @@ interface ServerEntry {
     port: number,
     user: string,
     pass: string,
+    maxCons?: number,
 }
 
 interface ClientConfig {
@@ -262,9 +263,14 @@ export async function nntp_xzver(c: NNTPClient, n: string) {
     }
 }
 
-export async function nntp_connect() {
+export function nntp_init() {
     const cfg = read_config();
-    const se = cfg.servers[cfg.reader];
+    return cfg.servers[cfg.reader];
+}
+
+export async function nntp_connect(mse?: ServerEntry) {
+    const cfg = read_config();
+    const se = mse ? mse! : cfg.servers[cfg.reader];
     const isSecureConnection = !![443, 563].filter(x => x === se.port).length;
     const fn_connect =  isSecureConnection ? Deno.connectTls : Deno.connect;
     const conn = await fn_connect({ hostname: se.url, port: se.port });
@@ -277,12 +283,3 @@ export async function nntp_connect() {
     };
 }
 
-export async function nntp_test() {
-    const c = await nntp_connect();
-    await nntp_auth(c);
-    await nntp_caps(c);
-    const gi = await nntp_group(c, 'comp.lang.forth');
-    await nntp_xover(c, `${gi.high-20}-${gi.high}`);
-    await nntp_xzver(c, `${gi.low}-${gi.high}`);
-    await nntp_quit(c);
-}

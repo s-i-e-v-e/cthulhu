@@ -15,31 +15,55 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  **/
 import {readTextFile} from "./io.ts";
-import {nntp_connect, nntp_stat, nntp_quit, nntp_auth} from "./nntp_client.ts";
+import {nntp_connect, nntp_stat, nntp_quit, nntp_auth, nntp_init} from "./nntp_client.ts";
 
 export async function nzb_stat(p: string) {
     const xml = readTextFile(p).replaceAll('</segment>', '></segment>');
     const xs = Array.from(xml.matchAll(/>([^>]+>)<\/segment>/gi)).map(x => `<${x[1]}`);
 
-    const c = await nntp_connect();
-    await nntp_auth(c);
-    const fo = [];
-    const nf = [];
-    let i = 0;
-    for (const x of xs) {
-        const r = await nntp_stat(c, x);
-        if (r.code === 223) {
-            fo.push(x);
+    const se = nntp_init();
+    const maxCons = se.maxCons ? se.maxCons : 1;
+
+    const fn = async (xs: string[], fo: string[], nf: string[], total: number) => {
+        const c = await nntp_connect(se);
+        await nntp_auth(c);
+        let i = 0;
+        for (const x of xs) {
+            const r = await nntp_stat(c, x);
+            if (r.code === 223) {
+                fo.push(x);
+            }
+            else {
+                nf.push(x);
+            }
+            i++;
+            const j = fo.length + nf.length;
+            if (j % 10 === 0) console.log(`${j}/${total}`);
         }
-        else {
-            nf.push(x);
-        }
-        i++;
-        if (i % 10 === 0) console.log(`${i}/${xs.length}`);
+
+        await nntp_quit(c);
     }
 
+    const xss = [];
+    const n = Math.floor(xs.length / maxCons);
+    let a = 0;
+    let b = 0;
+    for (let i = 0; i < maxCons;) {
+        b += n;
+        xss.push(xs.slice(a, b));
+        i++;
+        if (i === maxCons) break;
+        a = b;
+    }
+    if (b < xs.length) {
+        xss[xss.length-1] = xs.slice(a);
+    }
+    console.log(xs.length);
+    xss.forEach(z => console.log(z.length));
+
+    const fo: string[] = [];
+    const nf: string[] = [];
+    await Promise.all(xss.map(async z => fn(z, fo, nf, xs.length)));
     console.log(`Found: ${fo.length}/${xs.length}`);
     console.log(`Not found: ${nf.length}/${xs.length}`);
-
-    await nntp_quit(c);
 }

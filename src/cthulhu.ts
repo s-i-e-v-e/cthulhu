@@ -14,8 +14,7 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  **/
-
-import {nntp_test} from "./nntp_client.ts";
+import {test} from "./test.ts";
 
 const println = console.log;
 
@@ -43,7 +42,7 @@ export function main(args: string[]) {
         default: help(); break;
     }
 
-    nntp_test();
+    test();
 }
 
 if (import.meta.main) main(Deno.args);
