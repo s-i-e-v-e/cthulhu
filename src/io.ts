@@ -40,6 +40,12 @@ function mkdir(dir: string) {
     if (!exists(dir)) Deno.mkdirSync(dir, { recursive: true });
 }
 
+export function writeFile(p: string, data: Uint8Array) {
+    const fp = parse_path(p);
+    mkdir(fp.dir);
+    Deno.writeFileSync(p, data);
+}
+
 export function writeTextFile(p: string, data: string) {
     const fp = parse_path(p);
     mkdir(fp.dir);

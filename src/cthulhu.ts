@@ -15,7 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  **/
 
-import {nntp_connect} from "./nntp_client.ts";
+import {nntp_test} from "./nntp_client.ts";
 
 const println = console.log;
 
@@ -43,7 +43,7 @@ export function main(args: string[]) {
         default: help(); break;
     }
 
-    nntp_connect();
+    nntp_test();
 }
 
 if (import.meta.main) main(Deno.args);

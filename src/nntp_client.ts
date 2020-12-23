@@ -14,12 +14,19 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  **/
-import {exists, readTextFile, writeTextFile} from "./io.ts";
+import { unzlib, inflate } from "https://deno.land/x/denoflate/mod.ts";
+import {exists, readTextFile, writeFile, writeTextFile} from "./io.ts";
 
 const de = new TextDecoder("utf-8");
 const en = new TextEncoder();
 
 const CONFIG_FILE = './.cthulhu/config/client.json'
+
+interface NNTPResponse {
+    code: number,
+    message: string,
+    data?: Uint8Array,
+}
 
 interface ServerEntry {
     url: string,
@@ -33,6 +40,13 @@ interface ClientConfig {
     reader: number,
 }
 
+interface GroupInfo {
+    name: string,
+    count: number,
+    low: number,
+    high: number,
+}
+
 const DEFAULT_CONFIG = {
     servers: [
         {
@@ -41,6 +55,10 @@ const DEFAULT_CONFIG = {
         },
         {
             url: 'news.eternal-september.org',
+            port: 443,
+        },
+        {
+            url: 'nntp.aioe.org',
             port: 119,
         },
     ],
@@ -53,37 +71,99 @@ function read_config(): ClientConfig {
     return cfg;
 }
 
-async function readInfo(conn: Deno.Conn): Promise<string> {
-    const xs = [];
-    const p = new Uint8Array(1024*8);
-    while (true) {
-        const n = await conn.read(p);
-        if (n) xs.push(de.decode(p));
-        if (!n || n < p.byteLength) break;
+export function yEncDecode(encoded: Uint8Array) {
+    const a = encoded.indexOf(0x0D)+2;
+    const b = encoded.lastIndexOf(0x79)-3; // 'y'
+    const data = encoded.subarray(a, b);
+
+    let i = 0;
+    const out = new Uint8Array(data.byteLength+2);
+    let j = 0;
+    let esc = false;
+    while (i < data.length) {
+        let b = data[i];
+        if (b === 0x3D) {
+            esc = true;
+            i++;
+            continue;
+        }
+        else if (b === 0x0D || b === 0x0A) {
+            i++;
+            continue;
+        }
+        else if (esc) {
+            b = ((b - (64+42)) & 0xff);
+            esc = false;
+        }
+        else {
+            b = ((b - 42) & 0xff);
+        }
+        i++;
+        out[j] = b;
+        j++;
     }
-    return xs.join('');
+    return out.subarray(0, j);
 }
 
-async function readTextResponse(conn: Deno.Conn): Promise<string> {
-    const xs = [];
-    const p = new Uint8Array(1024*4);
-    xs.push('<$');
-    while (true) {
-        const n = await conn.read(p);
-        console.log(`n: ${n}`);
-        const x = de.decode(p);
-        xs.push(x);
-
-        if (n) {
-            if (x.length >= 5) {
-                const nn = x.length;
-                if (x[nn-1] === '\n' && x[nn-2] === '\r' && x[nn-3] === '.' && x[nn-4] === '\n' && x[nn-5] === '\r') break;
+async function readResponse(conn: Deno.Conn, codes: number[], isMultiline: boolean, isCompressed: boolean = false): Promise<NNTPResponse> {
+    const p = new Uint8Array(32);
+    let xs = new Uint8Array(32);
+    let i = 0;
+    for (;;) {
+        const n = i;
+        if (isMultiline) {
+            if (n >= 5 && xs[n-5] === 0x0D && xs[n-4] === 0x0A && xs[n-3] === 0x2E && xs[n-2] === 0x0D && xs[n-1] === 0x0A) {
+                xs = xs.subarray(0, n-5);
+                break;
             }
         }
-        if (!n || n < p.byteLength) break;
+        else {
+            if (n >= 2 && xs[n-2] === 0x0D && xs[n-1] === 0x0A) {
+                break;
+            }
+        }
+
+        const nn = await conn.read(p);
+        if (!nn) break;
+
+        for (let j = 0; j < nn; j++) {
+            xs[i] = p[j];
+            i += 1;
+        }
+        if (nn < p.byteLength) break;
+
+        if (i >= xs.byteLength) {
+            const ys = xs;
+            xs = new Uint8Array(xs.byteLength*2)
+            xs.set(ys, 0);
+        }
     }
-    xs.push('$>');
-    return xs.join('');
+    xs = xs.subarray(0, i);
+
+    const a = xs.indexOf(0x0D);
+    const x = de.decode(xs.subarray(0, a));
+    const v: NNTPResponse = {
+        code: Number(x.substring(0, 3)),
+        message: x.substring(3).trim(),
+        data: isMultiline && xs.byteLength > a+2 ? xs.subarray(a+2, xs.byteLength) : undefined,
+    };
+    if (!codes.filter(x => x === v.code).length) throw new Error(`Expected: one of ${codes.join(',')}. Found: ${v.code}`);
+    if (!isMultiline) return v;
+    if (!v.data) throw new Error();
+
+    if (isCompressed) {
+        const n = xs.byteLength;
+        if (v.data[0] === 0x78 && v.data[1] === 0x1) {
+            v.data = unzlib(v.data);
+        }
+        else if (v.data[0] === 0x3D && v.data[1] === 0x79) {
+            v.data = inflate(yEncDecode(v.data));
+        }
+        else {
+            throw new Error('DEFLATE error');
+        }
+    }
+    return v;
 }
 
 async function writeText(conn: Deno.Conn, x: string) {
@@ -92,26 +172,107 @@ async function writeText(conn: Deno.Conn, x: string) {
     if (n !== y.byteLength) throw new Error();
 }
 
-function print(x: string) {
-    console.log(x);
+async function print(r: Promise<NNTPResponse>|NNTPResponse) {
+    const rr: NNTPResponse = (r as NNTPResponse).code ? r as NNTPResponse: await r;
+    console.log(`${rr.code}: ${rr.message}`);
+    if (rr.data) {
+        const x = de.decode(rr.data).trim();
+        if (x.length) console.log(`${x}`);
+    }
+}
+
+export interface NNTPClient {
+    conn: Deno.Conn,
+    se: ServerEntry,
+    isSecureConnection: boolean,
+    group?: string,
+}
+
+export async function nntp_auth(c: NNTPClient) {
+    if (c.isSecureConnection && c.se.user) {
+        await writeText(c.conn,`AUTHINFO USER ${c.se.user}`);
+        const rr = await readResponse(c.conn, [281, 381, 481, 482, 502], false);
+        await print(rr);
+        if (rr.code === 381) {
+            await writeText(c.conn,`AUTHINFO PASS ${c.se.pass}`);
+            await print(readResponse(c.conn, [281, 481, 482, 502], false));
+        }
+    }
+}
+
+export async function nntp_caps(c: NNTPClient) {
+    await writeText(c.conn,'CAPABILITIES');
+    await print(readResponse(c.conn, [101], true));
+}
+
+export async function nntp_quit(c: NNTPClient) {
+    await writeText(c.conn,'QUIT');
+    await print(readResponse(c.conn, [205], false));
+
+    await c.conn.close();
+}
+
+export async function nntp_group(c: NNTPClient, g: string) {
+    await writeText(c.conn,`GROUP ${g}`);
+    const r = await readResponse(c.conn, [211,411], false);
+    await print(r);
+    const xs = r.message.split(' ');
+
+    c.group = g;
+    return {
+        name: xs[3],
+        count: Number(xs[0]),
+        low: Number(xs[1]),
+        high: Number(xs[2]),
+    };
+}
+
+export async function nntp_head(c: NNTPClient, idn: string) {
+    if (idn[0] === '<') {
+        await writeText(c.conn,`HEAD ${idn}`);
+        await print(readResponse(c.conn, [221,430], true));
+    }
+    else {
+        await writeText(c.conn,`HEAD ${idn}`);
+        await print(readResponse(c.conn, [221,412,423], true));
+    }
+}
+
+export async function nntp_xover(c: NNTPClient, n: string) {
+    await writeText(c.conn,`XOVER ${n}`);
+    await print(readResponse(c.conn, [224,412,420,502], true));
+}
+
+export async function nntp_xzver(c: NNTPClient, n: string) {
+    await writeText(c.conn,`XZVER ${n}`);
+    const df = await readResponse(c.conn, [224,412,420,502], true, true);
+    if (df.data) {
+        writeFile(`./.cthulhu/headers/${c.group}/${c.se.url}/data.txt`, df.data);
+    }
 }
 
 export async function nntp_connect() {
     const cfg = read_config();
     const se = cfg.servers[cfg.reader];
-    const fn_connect = se.port === 119 ? Deno.connect : Deno.connectTls;
+    const isSecureConnection = !![443, 563].filter(x => x === se.port).length;
+    const fn_connect =  isSecureConnection ? Deno.connectTls : Deno.connect;
     const conn = await fn_connect({ hostname: se.url, port: se.port });
+    await print(readResponse(conn, [200, 201, 400, 502], false));
 
-    print(await readInfo(conn));
+    return {
+        conn: conn,
+        se: se,
+        isSecureConnection: isSecureConnection,
+    };
+}
 
-    //await writeText(conn,'LIST ACTIVE');
-    await writeText(conn,'CAPABILITIES');
-    print(await readTextResponse(conn));
-    print(await readTextResponse(conn));
-
-    await writeText(conn,'QUIT');
-    print(await readTextResponse(conn));
-
-    print('>> close');
-    await conn.close();
+const Debug = true;
+export async function nntp_test() {
+    const c = await nntp_connect();
+    await nntp_auth(c);
+    await nntp_caps(c);
+    const gi = await nntp_group(c, 'comp.lang.forth');
+    await nntp_xover(c, `${gi.high-20}-${gi.high}`);
+    await nntp_xzver(c, `${gi.low}-${gi.high}`);
+    await nntp_quit(c);
 }
