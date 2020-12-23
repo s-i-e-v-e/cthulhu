@@ -227,6 +227,17 @@ export async function nntp_group(c: NNTPClient, g: string) {
     };
 }
 
+export async function nntp_stat(c: NNTPClient, idn: string) {
+    if (idn[0] === '<') {
+        await writeText(c.conn,`STAT ${idn}`);
+        return await readResponse(c.conn, [223,430], false);
+    }
+    else {
+        await writeText(c.conn,`STAT ${idn}`);
+        return await readResponse(c.conn, [223,412,423], false);
+    }
+}
+
 export async function nntp_head(c: NNTPClient, idn: string) {
     if (idn[0] === '<') {
         await writeText(c.conn,`HEAD ${idn}`);
