@@ -18,20 +18,51 @@ import {nntp_auth, nntp_caps, nntp_connect, nntp_group, nntp_quit, nntp_xover, n
 import {nzb_stat} from "./nzb.ts";
 
 export async function test() {
-    //await nntp_test();
-    await nzb_test();
+    await nntp_test();
+    //await nzb_test();
 }
 
 async function nzb_test() {
     nzb_stat('./.ignore/a.nzb');
 }
 
+function to_mb(n: number) {
+    return Math.floor(n/1024/1024);
+}
+
 async function nntp_test() {
     const c = await nntp_connect();
     await nntp_auth(c);
     await nntp_caps(c);
-    const gi = await nntp_group(c, 'comp.lang.forth');
-    await nntp_xover(c, `${gi.high-20}-${gi.high}`);
-    await nntp_xzver(c, `${gi.low}-${gi.high}`);
+
+    const groups = [
+        'comp.lang.ada',
+        'comp.lang.c',
+        'comp.lang.c.moderated',
+        'comp.lang.c++',
+        'comp.lang.c++.moderated',
+        'comp.lang.forth',
+        'comp.lang.lisp',
+        'comp.lang.python',
+        'comp.lang.ml',
+        'comp.lang.scheme',
+        'comp.os.minix',
+        'comp.os.plan9',
+        'comp.graphics.api.opengl',
+        'news.groups.proposals',
+        'news.software.readers',
+        'news.software.nntp',
+        'alt.binaries.pictures',
+    ];
+
+    for (const g of groups) {
+        const gi = await nntp_group(c, g);
+        console.log(`Estimated group header size: ${to_mb(gi.count*300)}-${to_mb(gi.count*500)}MB`);
+    }
+
+    const g = groups[Math.floor(Math.random() * groups.length)];
+    const gi = await nntp_group(c, g);
+    await nntp_xover(c, `${gi.high-2}-${gi.high}`);
+    //await nntp_xzver(c, `${gi.low}-${gi.high}`);
     await nntp_quit(c);
 }
