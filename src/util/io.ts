@@ -95,3 +95,8 @@ export function dump_hex(p: Uint8Array) {
 
     xs.forEach(x => console.log(x));
 }
+
+export function dump_hex_16(p: Uint8Array) {
+    dump_hex(p.subarray(0, 16));
+    dump_hex(p.subarray(p.byteLength-16));
+}

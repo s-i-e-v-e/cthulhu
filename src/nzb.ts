@@ -14,9 +14,9 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  **/
-import {readTextFile} from "./io.ts";
+import {readTextFile} from "./util/io.ts";
 import {nntp_connect, nntp_stat, nntp_quit, nntp_auth, nntp_init} from "./nntp_client.ts";
-import {xml_a, xml_e, xml_parse} from "./xml.ts";
+import {xml_a, xml_e, xml_parse} from "./util/xml.ts";
 
 interface Segment {
     bytes: number,

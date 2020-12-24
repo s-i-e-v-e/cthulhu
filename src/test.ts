@@ -28,8 +28,8 @@ import {
     nntp_xfeature_compress_gzip
 } from "./nntp_client.ts";
 import {nzb_stat} from "./nzb.ts";
-import {xml_parse} from "./xml.ts";
-import {readTextFile, writeTextFile} from "./io.ts";
+import {xml_parse} from "./util/xml.ts";
+import {readTextFile, writeTextFile} from "./util/io.ts";
 
 export async function test() {
     const g = GROUPS[2];
@@ -76,7 +76,6 @@ const GROUPS = [
 async function nntp_test_article() {
     const c = await nntp_connect();
     await nntp_auth(c);
-    await nntp_caps(c);
     await nntp_date(c);
     const g = GROUPS[Math.floor(Math.random() * GROUPS.length)];
     const gi = await nntp_group(c, g);
@@ -88,7 +87,6 @@ async function nntp_test_article() {
 async function nntp_test_body() {
     const c = await nntp_connect();
     await nntp_auth(c);
-    await nntp_caps(c);
     await nntp_date(c);
     const g = GROUPS[Math.floor(Math.random() * GROUPS.length)];
     const gi = await nntp_group(c, g);
@@ -100,7 +98,6 @@ async function nntp_test_body() {
 async function nntp_test_xfeature_compress_gzip(g: string) {
     const c = await nntp_connect();
     await nntp_auth(c);
-    await nntp_caps(c);
     await nntp_xfeature_compress_gzip(c);
     const gi = await nntp_group(c, g);
     await nntp_xover(c, `${gi.low}-${gi.high}`);

@@ -14,8 +14,9 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  **/
-import { unzlib, inflate } from "https://deno.land/x/denoflate/mod.ts";
-import {dump_hex, exists, readTextFile, writeFile, writeTextFile} from "./io.ts";
+import {exists, readTextFile, writeFile, writeTextFile} from "./util/io.ts";
+import {yenc_decode} from "./util/yenc.ts";
+import {zlib_inflate} from "./util/deflate.ts";
 
 const de = new TextDecoder("utf-8");
 const en = new TextEncoder();
@@ -70,40 +71,6 @@ function read_config(): ClientConfig {
     const cfg = exists(CONFIG_FILE) ? JSON.parse(readTextFile(CONFIG_FILE)) : DEFAULT_CONFIG;
     writeTextFile(CONFIG_FILE, JSON.stringify(cfg));
     return cfg;
-}
-
-export function yEncDecode(encoded: Uint8Array) {
-    const a = encoded.indexOf(0x0D)+2;
-    const b = encoded.lastIndexOf(0x79)-3; // 'y'
-    const data = encoded.subarray(a, b);
-
-    let i = 0;
-    const out = new Uint8Array(data.byteLength+2);
-    let j = 0;
-    let esc = false;
-    while (i < data.length) {
-        let b = data[i];
-        if (b === 0x3D) {
-            esc = true;
-            i++;
-            continue;
-        }
-        else if (b === 0x0D || b === 0x0A) {
-            i++;
-            continue;
-        }
-        else if (esc) {
-            b = ((b - (64+42)) & 0xff);
-            esc = false;
-        }
-        else {
-            b = ((b - 42) & 0xff);
-        }
-        i++;
-        out[j] = b;
-        j++;
-    }
-    return out.subarray(0, j);
 }
 
 async function readResponse(conn: Deno.Conn, codes: number[], isMultiline: boolean, isCompressed: boolean = false): Promise<NNTPResponse> {
@@ -165,27 +132,14 @@ async function readResponse(conn: Deno.Conn, codes: number[], isMultiline: boole
     if (!v.data) throw new Error();
 
     if (isCompressed) {
-        if (v.data[0] === 0x78) {
-            try {
-                v.data = unzlib(v.data);
-            }
-            catch (e) {
-                console.log('>> err::unzlib');
-            }
+        if (v.data[0] === 0x3D && v.data[1] === 0x79) {
+            v.data = yenc_decode(v.data);
         }
-        else if (v.data[0] === 0x3D && v.data[1] === 0x79) {
-            v.data = yEncDecode(v.data);
-            try {
-                v.data = inflate(v.data);
-            }
-            catch (e) {
-                console.log('>> err::inflate');
-            }
+        try {
+            v.data = zlib_inflate(v.data);
         }
-        else {
-            dump_hex(v.data.subarray(0, 16));
-            dump_hex(v.data.subarray(v.data.byteLength-16));
-            throw new Error('DEFLATE error');
+        catch (e) {
+            console.log('>> err::inflate');
         }
     }
     return v;
