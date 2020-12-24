@@ -16,10 +16,71 @@
  **/
 import {readTextFile} from "./io.ts";
 import {nntp_connect, nntp_stat, nntp_quit, nntp_auth, nntp_init} from "./nntp_client.ts";
+import {xml_a, xml_e, xml_parse} from "./xml.ts";
+
+interface Segment {
+    bytes: number,
+    number: number,
+    id: string,
+}
+
+interface Head {
+    title: string,
+    tag: string,
+    category: string,
+}
+
+interface File {
+    poster: string,
+    date: number,
+    subject: string,
+    segments: Segment[],
+    groups: string[],
+}
+
+interface NZB {
+    head: Head,
+    files: File[]
+}
+
+function to_jnzb(x: string): NZB {
+    const xml = xml_parse(x);
+    const nzb = xml_e(xml, 'nzb')[0];
+    const head = xml_e(nzb, 'head')[0];
+    const meta = xml_e(head, 'head').map(x => [xml_a(x, 'type')[1], x.nodes[0] as string]);
+    const files = xml_e(nzb, 'file');
+
+    const get_meta = (n: string) => {
+        const x = meta.filter(x => x[0] === n)[0];
+        return x ? x[1]: '';
+    };
+
+    return {
+        head: {
+            title: get_meta('title') || get_meta('name'),
+            tag: get_meta('tag'),
+            category: get_meta('category'),
+        },
+        files: files.map(x => {
+            const f: File = {
+                poster: xml_a(x, 'poster')[1],
+                subject: xml_a(x, 'subject')[1],
+                date: Number(xml_a(x, 'date')[1]),
+                groups: xml_e(xml_e(x, 'groups')[0], 'group').map(x => x.nodes[0] as string),
+                segments: xml_e(xml_e(x, 'segments')[0], 'segment').map(x => { return {
+                    bytes: Number(xml_a(x, 'bytes')[1]),
+                    number: Number(xml_a(x, 'number')[1]),
+                    id: `<${x.nodes[0] as string}>`,
+                };}),
+            };
+            return f;
+        }),
+    };
+}
 
 export async function nzb_stat(p: string) {
-    const xml = readTextFile(p).replaceAll('</segment>', '></segment>');
-    const xs = Array.from(xml.matchAll(/>([^>]+>)<\/segment>/gi)).map(x => `<${x[1]}`);
+    const jnzb = to_jnzb(readTextFile(p));
+    const xs = jnzb.files.map(x => x.segments).flat().map(x => x.id);
 
     const se = nntp_init();
     const maxCons = se.maxCons ? se.maxCons : 1;

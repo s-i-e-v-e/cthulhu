@@ -16,10 +16,19 @@
  **/
 import {nntp_auth, nntp_caps, nntp_connect, nntp_group, nntp_quit, nntp_xover, nntp_xzver} from "./nntp_client.ts";
 import {nzb_stat} from "./nzb.ts";
+import {xml_parse} from "./xml.ts";
+import {readTextFile, writeTextFile} from "./io.ts";
 
 export async function test() {
+    xml_test();
     await nntp_test();
     //await nzb_test();
+}
+
+export function xml_test() {
+    console.log(xml_parse('<foo><bar attr-name="value">some text</bar></foo>'));
+    const xml = xml_parse(readTextFile('./.ignore/a.nzb'));
+    writeTextFile('./.ignore/a.nzb.json', JSON.stringify(xml));
 }
 
 async function nzb_test() {
