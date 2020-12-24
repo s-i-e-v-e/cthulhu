@@ -58,6 +58,12 @@ export function readTextFile(p: string) {
     return Deno.readTextFileSync(p);
 }
 
+export function readFile(p: string) {
+    const fp = parse_path(p);
+    mkdir(fp.dir);
+    return Deno.readFileSync(p);
+}
+
 export function exists(p: string) {
     try {
         Deno.statSync(p as string);
@@ -71,4 +77,21 @@ export function exists(p: string) {
             throw e;
         }
     }
+}
+
+export function dump_hex(p: Uint8Array) {
+    const xs = [];
+    let ys = [];
+    for (let i = 0; i < p.byteLength; i++) {
+        if (i % 16 === 0 && i > 0) {
+            xs.push(ys.join(' '));
+            ys = [];
+        }
+        let a = p[i].toString(16);
+        a = a.length === 1 ? `0x0${a}` : `0x${a}`;
+        ys.push(a);
+    }
+    xs.push(ys.join(' '));
+
+    xs.forEach(x => console.log(x));
 }

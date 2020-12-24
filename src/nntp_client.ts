@@ -15,7 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  **/
 import { unzlib, inflate } from "https://deno.land/x/denoflate/mod.ts";
-import {exists, readTextFile, writeFile, writeTextFile} from "./io.ts";
+import {dump_hex, exists, readTextFile, writeFile, writeTextFile} from "./io.ts";
 
 const de = new TextDecoder("utf-8");
 const en = new TextEncoder();
@@ -107,37 +107,48 @@ export function yEncDecode(encoded: Uint8Array) {
 }
 
 async function readResponse(conn: Deno.Conn, codes: number[], isMultiline: boolean, isCompressed: boolean = false): Promise<NNTPResponse> {
-    const p = new Uint8Array(2);
-    let xs = new Uint8Array(32);
-    let i = 0;
+    if (isCompressed) await writeText(conn, 'DATE');
+    const p = new Uint8Array(1024*256);
+    let xs = new Uint8Array(p.byteLength*4);
+    let n = 0;
     for (;;) {
-        const n = i;
-        if (isMultiline) {
-            if (n >= 5 && xs[n-3] === 0x2E && xs[n-5] === 0x0D && xs[n-4] === 0x0A && xs[n-2] === 0x0D && xs[n-1] === 0x0A) {
-                xs = xs.subarray(0, n-5);
-                break;
-            }
-        }
-        else {
-            if (n >= 2 && xs[n-2] === 0x0D && xs[n-1] === 0x0A) {
-                break;
-            }
-        }
-
         const nn = await conn.read(p);
         if (!nn) break;
-
-        xs.set(p.subarray(0, nn), i);
-        i += nn;
-        if (nn < p.byteLength) break;
-
-        if (i >= xs.byteLength) {
+        if (n+nn >= xs.byteLength) {
             const ys = xs;
             xs = new Uint8Array(xs.byteLength*2)
             xs.set(ys, 0);
         }
+        xs.set(p.subarray(0, nn), n);
+        n += nn;
+
+        const c0 = xs[n-1];
+        const c1 = xs[n-2];
+        const c2 = xs[n-3];
+        const c3 = xs[n-4];
+        const c4 = xs[n-5];
+
+        const is_crlf = c1 === 0x0D && c0 === 0x0A;
+        if (is_crlf) {
+            if (!isMultiline) break;
+            if (c2 === 0x2E && c3 === 0x0A && c4 === 0x0D) {
+                n -= 5;
+                break;
+            }
+            if (isCompressed) {
+                const ys = xs.subarray(n-20, n);
+                const a0 = ys[0];
+                const a1 = ys[1];
+                const a2 = ys[2];
+                const a3 = ys[3];
+                if (a0 === 0x31 && a1 === 0x31 && a2 === 0x31 && a3 === 0x20) {
+                    n -= 20;
+                    break;
+                }
+            }
+        }
     }
-    xs = xs.subarray(0, i);
+    xs = xs.subarray(0, n);
 
     const a = xs.indexOf(0x0D);
     const x = de.decode(xs.subarray(0, a));
@@ -154,13 +165,26 @@ async function readResponse(conn: Deno.Conn, codes: number[], isMultiline: boole
     if (!v.data) throw new Error();
 
     if (isCompressed) {
-        if (v.data[0] === 0x78 && v.data[1] === 0x1) {
-            v.data = unzlib(v.data);
+        if (v.data[0] === 0x78) {
+            try {
+                v.data = unzlib(v.data);
+            }
+            catch (e) {
+                console.log('>> err::unzlib');
+            }
         }
         else if (v.data[0] === 0x3D && v.data[1] === 0x79) {
-            v.data = inflate(yEncDecode(v.data));
+            v.data = yEncDecode(v.data);
+            try {
+                v.data = inflate(v.data);
+            }
+            catch (e) {
+                console.log('>> err::inflate');
+            }
         }
         else {
+            dump_hex(v.data.subarray(0, 16));
+            dump_hex(v.data.subarray(v.data.byteLength-16));
             throw new Error('DEFLATE error');
         }
     }
@@ -186,6 +210,7 @@ export interface NNTPClient {
     conn: Deno.Conn,
     se: ServerEntry,
     isSecureConnection: boolean,
+    isCompressed: boolean,
     group?: string,
 }
 
@@ -213,6 +238,15 @@ export async function nntp_quit(c: NNTPClient) {
     await c.conn.close();
 }
 
+export async function nntp_date(c: NNTPClient) {
+    await writeText(c.conn,'DATE');
+    await print(readResponse(c.conn, [111], false));
+}
+
+function to_mb(n: number) {
+    return Math.floor(n/1024/1024);
+}
+
 export async function nntp_group(c: NNTPClient, g: string) {
     await writeText(c.conn,`GROUP ${g}`);
     const r = await readResponse(c.conn, [211,411], false);
@@ -220,39 +254,67 @@ export async function nntp_group(c: NNTPClient, g: string) {
     const xs = r.message.split(' ');
 
     c.group = g;
-    return {
+    const gi = {
         name: xs[3],
         count: Number(xs[0]),
         low: Number(xs[1]),
         high: Number(xs[2]),
     };
+    console.log(`Estimated group header size: ${to_mb(gi.count*300)}-${to_mb(gi.count*500)}MB`);
+    return gi;
 }
 
-export async function nntp_stat(c: NNTPClient, idn: string) {
-    if (idn[0] === '<') {
-        await writeText(c.conn,`STAT ${idn}`);
-        return await readResponse(c.conn, [223,430], false);
+export async function nntp_get(c: NNTPClient, cmd: string, code: number, isMultiline: boolean, idn: string) {
+    let r;
+    if (idn) {
+        await writeText(c.conn,`${cmd} ${idn}`);
+        if (idn[0] === '<') {
+            r = readResponse(c.conn, [code,430], isMultiline);
+        }
+        else {
+            r = readResponse(c.conn, [code,412,423], isMultiline);
+        }
     }
     else {
-        await writeText(c.conn,`STAT ${idn}`);
-        return await readResponse(c.conn, [223,412,423], false);
+        await writeText(c.conn,`${cmd}`);
+        r = readResponse(c.conn, [code,412,420], isMultiline);
     }
+    await print(r);
+    return r;
+}
+export async function nntp_stat(c: NNTPClient, idn: string) {
+    return nntp_get(c, 'STAT', 223, false, idn);
+}
+
+export async function nntp_body(c: NNTPClient, idn: string) {
+    return nntp_get(c, 'BODY', 222, true, idn);
 }
 
 export async function nntp_head(c: NNTPClient, idn: string) {
-    if (idn[0] === '<') {
-        await writeText(c.conn,`HEAD ${idn}`);
-        await print(readResponse(c.conn, [221,430], true));
-    }
-    else {
-        await writeText(c.conn,`HEAD ${idn}`);
-        await print(readResponse(c.conn, [221,412,423], true));
-    }
+    return nntp_get(c, 'HEAD', 221, true, idn);
+}
+
+export async function nntp_article(c: NNTPClient, idn: string) {
+    return nntp_get(c, 'ARTICLE', 220, true, idn);
+}
+
+export async function nntp_xfeature_compress_gzip(c: NNTPClient) {
+    await writeText(c.conn,'XFEATURE COMPRESS GZIP TERMINATOR');
+    await print(readResponse(c.conn, [290], false));
+    c.isCompressed = true;
 }
 
 export async function nntp_xover(c: NNTPClient, n: string) {
     await writeText(c.conn,`XOVER ${n}`);
-    await print(readResponse(c.conn, [224,412,420,502], true));
+    const df = await readResponse(c.conn, [224,412,420,502], true, c.isCompressed);
+    if (df.data) {
+        if (c.isCompressed || df.data.length > 1000) {
+            writeFile(`./.cthulhu/headers/${c.group}/${c.se.url}/data.txt`, df.data);
+        }
+        else {
+            await print(df);
+        }
+    }
 }
 
 export async function nntp_xzver(c: NNTPClient, n: string) {
@@ -280,6 +342,7 @@ export async function nntp_connect(mse?: ServerEntry) {
         conn: conn,
         se: se,
         isSecureConnection: isSecureConnection,
+        isCompressed: false,
     };
 }
 

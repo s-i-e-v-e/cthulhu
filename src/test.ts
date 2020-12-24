@@ -14,15 +14,33 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  **/
-import {nntp_auth, nntp_caps, nntp_connect, nntp_group, nntp_quit, nntp_xover, nntp_xzver} from "./nntp_client.ts";
+import {
+    nntp_article,
+    nntp_auth,
+    nntp_body,
+    nntp_caps,
+    nntp_connect,
+    nntp_date,
+    nntp_group,
+    nntp_quit,
+    nntp_xover,
+    nntp_xzver,
+    nntp_xfeature_compress_gzip
+} from "./nntp_client.ts";
 import {nzb_stat} from "./nzb.ts";
 import {xml_parse} from "./xml.ts";
 import {readTextFile, writeTextFile} from "./io.ts";
 
 export async function test() {
+    const g = GROUPS[2];
     xml_test();
-    await nntp_test();
     //await nzb_test();
+    await nntp_test_groups();
+    await nntp_test_article();
+    await nntp_test_body();
+    await nntp_test_xover(g);
+    await nntp_test_xzver(g);
+    await nntp_test_xfeature_compress_gzip(g);
 }
 
 export function xml_test() {
@@ -35,43 +53,81 @@ async function nzb_test() {
     nzb_stat('./.ignore/a.nzb');
 }
 
-function to_mb(n: number) {
-    return Math.floor(n/1024/1024);
-}
+const GROUPS = [
+    'comp.lang.ada',
+    'comp.lang.c',
+    'comp.lang.c.moderated',
+    'comp.lang.c++',
+    'comp.lang.c++.moderated',
+    'comp.lang.forth',
+    'comp.lang.lisp',
+    'comp.lang.python',
+    'comp.lang.ml',
+    'comp.lang.scheme',
+    'comp.os.minix',
+    'comp.os.plan9',
+    'comp.graphics.api.opengl',
+    'news.groups.proposals',
+    'news.software.readers',
+    'news.software.nntp',
+    'alt.binaries.pictures',
+];
 
-async function nntp_test() {
+async function nntp_test_article() {
     const c = await nntp_connect();
     await nntp_auth(c);
     await nntp_caps(c);
-
-    const groups = [
-        'comp.lang.ada',
-        'comp.lang.c',
-        'comp.lang.c.moderated',
-        'comp.lang.c++',
-        'comp.lang.c++.moderated',
-        'comp.lang.forth',
-        'comp.lang.lisp',
-        'comp.lang.python',
-        'comp.lang.ml',
-        'comp.lang.scheme',
-        'comp.os.minix',
-        'comp.os.plan9',
-        'comp.graphics.api.opengl',
-        'news.groups.proposals',
-        'news.software.readers',
-        'news.software.nntp',
-        'alt.binaries.pictures',
-    ];
-
-    for (const g of groups) {
-        const gi = await nntp_group(c, g);
-        console.log(`Estimated group header size: ${to_mb(gi.count*300)}-${to_mb(gi.count*500)}MB`);
-    }
-
-    const g = groups[Math.floor(Math.random() * groups.length)];
+    await nntp_date(c);
+    const g = GROUPS[Math.floor(Math.random() * GROUPS.length)];
     const gi = await nntp_group(c, g);
-    await nntp_xover(c, `${gi.high-2}-${gi.high}`);
-    //await nntp_xzver(c, `${gi.low}-${gi.high}`);
+    await nntp_article(c, `${gi.high}`);
+    //await nntp_article(c, '');
+    await nntp_quit(c);
+}
+
+async function nntp_test_body() {
+    const c = await nntp_connect();
+    await nntp_auth(c);
+    await nntp_caps(c);
+    await nntp_date(c);
+    const g = GROUPS[Math.floor(Math.random() * GROUPS.length)];
+    const gi = await nntp_group(c, g);
+    await nntp_body(c, `${gi.high}`);
+    //await nntp_body(c, '');
+    await nntp_quit(c);
+}
+
+async function nntp_test_xfeature_compress_gzip(g: string) {
+    const c = await nntp_connect();
+    await nntp_auth(c);
+    await nntp_caps(c);
+    await nntp_xfeature_compress_gzip(c);
+    const gi = await nntp_group(c, g);
+    await nntp_xover(c, `${gi.low}-${gi.high}`);
+    await nntp_quit(c);
+}
+
+async function nntp_test_xover(g: string) {
+    const c = await nntp_connect();
+    await nntp_auth(c);
+    const gi = await nntp_group(c, g);
+    await nntp_xover(c, `${gi.low}-${gi.high}`);
+    await nntp_quit(c);
+}
+
+async function nntp_test_xzver(g: string) {
+    const c = await nntp_connect();
+    await nntp_auth(c);
+    const gi = await nntp_group(c, g);
+    await nntp_xzver(c, `${gi.low}-${gi.high}`);
+    await nntp_quit(c);
+}
+
+async function nntp_test_groups() {
+    const c = await nntp_connect();
+    await nntp_auth(c);
+    for (const g of GROUPS) {
+        await nntp_group(c, g);
+    }
     await nntp_quit(c);
 }
