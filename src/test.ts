@@ -30,17 +30,23 @@ import {
 import {nzb_stat} from "./nzb.ts";
 import {xml_parse} from "./util/xml.ts";
 import {readTextFile, writeTextFile} from "./util/io.ts";
+import {config_read, ServerEntry} from "./util/config.ts";
 
 export async function test() {
+    const cfg = config_read();
+    const se = cfg.servers[cfg.reader];
+/*
     const g = GROUPS[2];
     xml_test();
-    //await nzb_test();
-    await nntp_test_groups();
-    await nntp_test_article();
-    await nntp_test_body();
-    await nntp_test_xover(g);
-    await nntp_test_xzver(g);
-    await nntp_test_xfeature_compress_gzip(g);
+    await nzb_test();
+    await nntp_test_groups(se);
+    await nntp_test_article(se);
+    await nntp_test_body(se);
+    await nntp_test_xover(se, g);
+    await nntp_test_xzver(se, g);
+    await nntp_test_xfeature_compress_gzip(se, g);
+ */
+    await nntp_test_caps(cfg.servers);
 }
 
 export function xml_test() {
@@ -49,8 +55,8 @@ export function xml_test() {
     writeTextFile('./.ignore/a.nzb.json', JSON.stringify(xml));
 }
 
-async function nzb_test() {
-    nzb_stat('./.ignore/a.nzb');
+async function nzb_test(se: ServerEntry) {
+    nzb_stat(se,'./.ignore/a.nzb');
 }
 
 const GROUPS = [
@@ -73,8 +79,21 @@ const GROUPS = [
     'alt.binaries.pictures',
 ];
 
-async function nntp_test_article() {
-    const c = await nntp_connect();
+async function nntp_test_caps(xs: ServerEntry[]) {
+    for (const se of xs) {
+        if (se.disable) continue;
+        console.log(`--------------------------------`);
+        console.log(`[${se.url}:${se.port}]`);
+        const c = await nntp_connect(se);
+        await nntp_auth(c);
+        await nntp_caps(c);
+        await nntp_date(c);
+        await nntp_quit(c);
+    }
+}
+
+async function nntp_test_article(se: ServerEntry) {
+    const c = await nntp_connect(se);
     await nntp_auth(c);
     await nntp_date(c);
     const g = GROUPS[Math.floor(Math.random() * GROUPS.length)];
@@ -84,8 +103,8 @@ async function nntp_test_article() {
     await nntp_quit(c);
 }
 
-async function nntp_test_body() {
-    const c = await nntp_connect();
+async function nntp_test_body(se: ServerEntry) {
+    const c = await nntp_connect(se);
     await nntp_auth(c);
     await nntp_date(c);
     const g = GROUPS[Math.floor(Math.random() * GROUPS.length)];
@@ -95,8 +114,8 @@ async function nntp_test_body() {
     await nntp_quit(c);
 }
 
-async function nntp_test_xfeature_compress_gzip(g: string) {
-    const c = await nntp_connect();
+async function nntp_test_xfeature_compress_gzip(se: ServerEntry, g: string) {
+    const c = await nntp_connect(se);
     await nntp_auth(c);
     await nntp_xfeature_compress_gzip(c);
     const gi = await nntp_group(c, g);
@@ -104,24 +123,24 @@ async function nntp_test_xfeature_compress_gzip(g: string) {
     await nntp_quit(c);
 }
 
-async function nntp_test_xover(g: string) {
-    const c = await nntp_connect();
+async function nntp_test_xover(se: ServerEntry, g: string) {
+    const c = await nntp_connect(se);
     await nntp_auth(c);
     const gi = await nntp_group(c, g);
     await nntp_xover(c, `${gi.low}-${gi.high}`);
     await nntp_quit(c);
 }
 
-async function nntp_test_xzver(g: string) {
-    const c = await nntp_connect();
+async function nntp_test_xzver(se: ServerEntry, g: string) {
+    const c = await nntp_connect(se);
     await nntp_auth(c);
     const gi = await nntp_group(c, g);
     await nntp_xzver(c, `${gi.low}-${gi.high}`);
     await nntp_quit(c);
 }
 
-async function nntp_test_groups() {
-    const c = await nntp_connect();
+async function nntp_test_groups(se: ServerEntry) {
+    const c = await nntp_connect(se);
     await nntp_auth(c);
     for (const g of GROUPS) {
         await nntp_group(c, g);

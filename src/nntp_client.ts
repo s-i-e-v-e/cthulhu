@@ -14,14 +14,13 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  **/
-import {exists, readTextFile, writeFile, writeTextFile} from "./util/io.ts";
+import {writeFile} from "./util/io.ts";
 import {yenc_decode} from "./util/yenc.ts";
 import {zlib_inflate} from "./util/deflate.ts";
+import {ServerEntry} from "./util/config.ts";
 
 const de = new TextDecoder("utf-8");
 const en = new TextEncoder();
-
-const CONFIG_FILE = './.cthulhu/config/client.json'
 
 interface NNTPResponse {
     code: number,
@@ -29,48 +28,11 @@ interface NNTPResponse {
     data?: Uint8Array,
 }
 
-interface ServerEntry {
-    url: string,
-    port: number,
-    user: string,
-    pass: string,
-    maxCons?: number,
-}
-
-interface ClientConfig {
-    servers: ServerEntry[],
-    reader: number,
-}
-
 interface GroupInfo {
     name: string,
     count: number,
     low: number,
     high: number,
-}
-
-const DEFAULT_CONFIG = {
-    servers: [
-        {
-            url: 'news.neodome.net',
-            port: 119,
-        },
-        {
-            url: 'news.eternal-september.org',
-            port: 443,
-        },
-        {
-            url: 'nntp.aioe.org',
-            port: 119,
-        },
-    ],
-    reader: 0,
-};
-
-function read_config(): ClientConfig {
-    const cfg = exists(CONFIG_FILE) ? JSON.parse(readTextFile(CONFIG_FILE)) : DEFAULT_CONFIG;
-    writeTextFile(CONFIG_FILE, JSON.stringify(cfg));
-    return cfg;
 }
 
 async function readResponse(conn: Deno.Conn, codes: number[], isMultiline: boolean, isCompressed: boolean = false): Promise<NNTPResponse> {
@@ -279,14 +241,7 @@ export async function nntp_xzver(c: NNTPClient, n: string) {
     }
 }
 
-export function nntp_init() {
-    const cfg = read_config();
-    return cfg.servers[cfg.reader];
-}
-
-export async function nntp_connect(mse?: ServerEntry) {
-    const cfg = read_config();
-    const se = mse ? mse! : cfg.servers[cfg.reader];
+export async function nntp_connect(se: ServerEntry) {
     const isSecureConnection = !![443, 563].filter(x => x === se.port).length;
     const fn_connect =  isSecureConnection ? Deno.connectTls : Deno.connect;
     const conn = await fn_connect({ hostname: se.url, port: se.port });

@@ -15,8 +15,9 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  **/
 import {readTextFile} from "./util/io.ts";
-import {nntp_connect, nntp_stat, nntp_quit, nntp_auth, nntp_init} from "./nntp_client.ts";
+import {nntp_connect, nntp_stat, nntp_quit, nntp_auth} from "./nntp_client.ts";
 import {xml_a, xml_e, xml_parse} from "./util/xml.ts";
+import {ServerEntry} from "./util/config.ts";
 
 interface Segment {
     bytes: number,
@@ -78,11 +79,10 @@ function to_jnzb(x: string): NZB {
     };
 }
 
-export async function nzb_stat(p: string) {
+export async function nzb_stat(se: ServerEntry, p: string) {
     const jnzb = to_jnzb(readTextFile(p));
     const xs = jnzb.files.map(x => x.segments).flat().map(x => x.id);
 
-    const se = nntp_init();
     const maxCons = se.maxCons ? se.maxCons : 1;
 
     const fn = async (xs: string[], fo: string[], nf: string[], total: number) => {
