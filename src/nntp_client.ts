@@ -122,11 +122,16 @@ async function print(r: Promise<NNTPResponse>|NNTPResponse) {
     }
 }
 
+const COMPRESSION_NONE = 0;
+const COMPRESSION_ASTRAWEB_XZ = 1;
+const COMPRESSION_XFEATURE_COMPRESSION_GZIP_TERMINATOR = 2;
+const COMPRESSION_COMPRESS_DEFLATE = 3;
 export interface NNTPClient {
     conn: Deno.Conn,
     se: ServerEntry,
     isSecureConnection: boolean,
-    isCompressed: boolean,
+    compressionType: number,
+    compressionIsActive: boolean,
     group?: string,
 }
 
@@ -142,9 +147,23 @@ export async function nntp_auth(c: NNTPClient) {
     }
 }
 
-export async function nntp_caps(c: NNTPClient) {
+export async function nntp_caps(c: NNTPClient, echo: boolean = true) {
     await writeText(c.conn,'CAPABILITIES');
-    await print(readResponse(c.conn, [101], true));
+    const r = await readResponse(c.conn, [101], true);
+    if (echo) await print(r);
+    const x = de.decode(r.data);
+    if (x.indexOf('COMPRESS DEFLATE') >= 0) {
+        c.compressionType = COMPRESSION_COMPRESS_DEFLATE;
+    }
+    else if (x.indexOf('XFEATURE-COMPRESS GZIP TERMINATOR') >= 0) {
+        c.compressionType = COMPRESSION_XFEATURE_COMPRESSION_GZIP_TERMINATOR;
+    }
+    else if (x.indexOf('XZVER') >= 0) {
+        c.compressionType = COMPRESSION_ASTRAWEB_XZ;
+    }
+    else {
+        c.compressionType = COMPRESSION_NONE;
+    }
 }
 
 export async function nntp_quit(c: NNTPClient) {
@@ -214,44 +233,72 @@ export async function nntp_article(c: NNTPClient, idn: string) {
     return nntp_get(c, 'ARTICLE', 220, true, idn);
 }
 
+export async function nntp_compress_deflate(c: NNTPClient) {
+    await writeText(c.conn,'COMPRESS DEFLATE');
+    await print(readResponse(c.conn, [206, 403, 502], false));
+}
+
 export async function nntp_xfeature_compress_gzip(c: NNTPClient) {
     await writeText(c.conn,'XFEATURE COMPRESS GZIP TERMINATOR');
     await print(readResponse(c.conn, [290], false));
-    c.isCompressed = true;
-}
-
-export async function nntp_xover(c: NNTPClient, n: string) {
-    await writeText(c.conn,`XOVER ${n}`);
-    const df = await readResponse(c.conn, [224,412,420,502], true, c.isCompressed);
-    if (df.data) {
-        if (c.isCompressed || df.data.length > 1000) {
-            writeFile(`./.cthulhu/headers/${c.group}/${c.se.url}/data.txt`, df.data);
-        }
-        else {
-            await print(df);
-        }
-    }
 }
 
 export async function nntp_xzver(c: NNTPClient, n: string) {
-    await writeText(c.conn,`XZVER ${n}`);
-    const df = await readResponse(c.conn, [224,412,420,502], true, true);
-    if (df.data) {
-        writeFile(`./.cthulhu/headers/${c.group}/${c.se.url}/data.txt`, df.data);
+    await nntp_xover(c, n);
+}
+
+async function nntp_activate_compression(c: NNTPClient) {
+    if (!c.compressionIsActive) {
+        if (c.compressionType === COMPRESSION_COMPRESS_DEFLATE) {
+            await nntp_compress_deflate(c);
+            c.compressionIsActive = true;
+        }
+        else if (c.compressionType === COMPRESSION_XFEATURE_COMPRESSION_GZIP_TERMINATOR) {
+            await nntp_xfeature_compress_gzip(c);
+            c.compressionIsActive = true;
+        }
+        else {
+            // nothing
+        }
     }
 }
 
-export async function nntp_connect(se: ServerEntry) {
+export async function nntp_xover(c: NNTPClient, n: string) {
+    await nntp_activate_compression(c);
+    if (c.compressionIsActive) {
+        await writeText(c.conn,`XOVER ${n}`);
+        const df = await readResponse(c.conn, [224,412,420,502], true, c.compressionIsActive);
+        if (df.data) {
+            if (df.data.length > 1000) {
+                writeFile(`./.cthulhu/headers/${c.group}/${c.se.url}/data.txt`, df.data);
+            }
+            else {
+                await print(df);
+            }
+        }
+    }
+    else {
+        await writeText(c.conn,`XZVER ${n}`);
+        const df = await readResponse(c.conn, [224,412,420,502], true, true);
+        if (df.data) {
+            writeFile(`./.cthulhu/headers/${c.group}/${c.se.url}/data.txt`, df.data);
+        }
+    }
+}
+
+export async function nntp_connect(se: ServerEntry): Promise<NNTPClient> {
     const isSecureConnection = !![443, 563].filter(x => x === se.port).length;
     const fn_connect =  isSecureConnection ? Deno.connectTls : Deno.connect;
     const conn = await fn_connect({ hostname: se.url, port: se.port });
     await print(readResponse(conn, [200, 201, 400, 502], false));
-
-    return {
+    const c = {
         conn: conn,
         se: se,
         isSecureConnection: isSecureConnection,
-        isCompressed: false,
+        compressionType: COMPRESSION_NONE,
+        compressionIsActive: false,
     };
+    await nntp_caps(c, false);
+    return c;
 }
 
