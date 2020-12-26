@@ -97,6 +97,22 @@ export function dump_hex(p: Uint8Array) {
 }
 
 export function dump_hex_16(p: Uint8Array) {
-    dump_hex(p.subarray(0, 16));
-    dump_hex(p.subarray(p.byteLength-16));
+    if (p.byteLength <= 32) {
+        dump_hex(p);
+    }
+    else {
+        dump_hex(p.subarray(0, 16));
+        dump_hex(p.subarray(p.byteLength-16));
+    }
+}
+
+const de = new TextDecoder("utf-8");
+const en = new TextEncoder();
+
+export function to_utf8(xs: Uint8Array) {
+    return de.decode(xs);
+}
+
+export function from_utf8(x: string) {
+    return en.encode(x);
 }

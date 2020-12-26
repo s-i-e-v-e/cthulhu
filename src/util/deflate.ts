@@ -14,7 +14,11 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  **/
-import { unzlib, inflate } from "https://deno.land/x/denoflate/mod.ts";
+import { unzlib, inflate, deflate } from "https://deno.land/x/denoflate/mod.ts";
+
+export function zlib_deflate(p: Uint8Array) {
+    return deflate(p, undefined);
+}
 
 export function zlib_inflate(p: Uint8Array) {
     if (p[0] === 0x78) return unzlib(p);

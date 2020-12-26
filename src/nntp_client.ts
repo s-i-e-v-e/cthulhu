@@ -14,13 +14,10 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  **/
-import {writeFile} from "./util/io.ts";
+import {to_utf8, from_utf8, writeFile, dump_hex_16} from "./util/io.ts";
 import {yenc_decode} from "./util/yenc.ts";
-import {zlib_inflate} from "./util/deflate.ts";
+import {zlib_deflate, zlib_inflate} from "./util/deflate.ts";
 import {ServerEntry} from "./util/config.ts";
-
-const de = new TextDecoder("utf-8");
-const en = new TextEncoder();
 
 interface NNTPResponse {
     code: number,
@@ -35,13 +32,15 @@ interface GroupInfo {
     high: number,
 }
 
-async function readResponse(conn: Deno.Conn, codes: number[], isMultiline: boolean, isCompressed: boolean = false): Promise<NNTPResponse> {
-    if (isCompressed) await writeText(conn, 'DATE');
-    const p = new Uint8Array(1024*256);
+async function readResponse(c: NNTPClient, codes: number[], isMultiline: boolean): Promise<NNTPResponse> {
+    const is_xz = c.activeCompressionType === COMPRESSION_XZVER;
+    const is_deflate = c.activeCompressionType === COMPRESSION_COMPRESS_DEFLATE;
+    if (is_xz) await writeText(c, 'DATE');
+    const p = new Uint8Array(1024*16);
     let xs = new Uint8Array(p.byteLength*4);
     let n = 0;
     for (;;) {
-        const nn = await conn.read(p);
+        const nn = await c.conn.read(p);
         if (!nn) break;
         if (n+nn >= xs.byteLength) {
             const ys = xs;
@@ -64,7 +63,7 @@ async function readResponse(conn: Deno.Conn, codes: number[], isMultiline: boole
                 n -= 5;
                 break;
             }
-            if (isCompressed) {
+            if (is_xz) {
                 const ys = xs.subarray(n-20, n);
                 const a0 = ys[0];
                 const a1 = ys[1];
@@ -77,10 +76,14 @@ async function readResponse(conn: Deno.Conn, codes: number[], isMultiline: boole
             }
         }
     }
+    if (n === 0) throw new Error('cthulhu err: Connection closed by server');
     xs = xs.subarray(0, n);
 
+    if (c.activeCompressionType) {
+        xs = zlib_inflate(xs);
+    }
     const a = xs.indexOf(0x0D);
-    const x = de.decode(xs.subarray(0, a));
+    const x = to_utf8(xs.subarray(0, a));
     if (isMultiline && xs.byteLength <= a+2) throw new Error(`${xs.byteLength}:${x}`);
     xs = xs.subarray(a+2);
     if (!isMultiline && xs.byteLength) throw new Error(`${xs.byteLength}:${x}`);
@@ -93,7 +96,7 @@ async function readResponse(conn: Deno.Conn, codes: number[], isMultiline: boole
     if (!isMultiline) return v;
     if (!v.data) throw new Error();
 
-    if (isCompressed) {
+    if (is_xz) {
         if (v.data[0] === 0x3D && v.data[1] === 0x79) {
             v.data = yenc_decode(v.data);
         }
@@ -107,9 +110,10 @@ async function readResponse(conn: Deno.Conn, codes: number[], isMultiline: boole
     return v;
 }
 
-async function writeText(conn: Deno.Conn, x: string) {
-    const y = en.encode(`${x}\r\n`);
-    const n = await conn.write(y);
+async function writeText(c: NNTPClient, x: string) {
+    let y = from_utf8(`${x}\r\n`);
+    y = c.activeCompressionType === COMPRESSION_COMPRESS_DEFLATE ? zlib_deflate(y) : y;
+    const n = await c.conn.write(y);
     if (n !== y.byteLength) throw new Error();
 }
 
@@ -117,65 +121,67 @@ async function print(r: Promise<NNTPResponse>|NNTPResponse) {
     const rr: NNTPResponse = (r as NNTPResponse).code ? r as NNTPResponse: await r;
     console.log(`${rr.code}: ${rr.message}`);
     if (rr.data) {
-        const x = de.decode(rr.data).trim();
+        const x = to_utf8(rr.data).trim();
         if (x.length) console.log(`${x}`);
     }
 }
 
 const COMPRESSION_NONE = 0;
-const COMPRESSION_ASTRAWEB_XZ = 1;
-const COMPRESSION_XFEATURE_COMPRESSION_GZIP_TERMINATOR = 2;
-const COMPRESSION_COMPRESS_DEFLATE = 3;
+const COMPRESSION_COMPRESS_DEFLATE = 1;
+const COMPRESSION_XZVER = 2;
+const COMPRESSION_XFEATURE_COMPRESSION_GZIP_TERMINATOR = 3;
+
 export interface NNTPClient {
     conn: Deno.Conn,
     se: ServerEntry,
     isSecureConnection: boolean,
-    compressionType: number,
-    compressionIsActive: boolean,
+    supportedCompressionType: number,
+    activeCompressionType: number,
     group?: string,
 }
 
 export async function nntp_auth(c: NNTPClient) {
     if (c.isSecureConnection && c.se.user) {
-        await writeText(c.conn,`AUTHINFO USER ${c.se.user}`);
-        const rr = await readResponse(c.conn, [281, 381, 481, 482, 502], false);
+        await writeText(c,`AUTHINFO USER ${c.se.user}`);
+        const rr = await readResponse(c, [281, 381, 481, 482, 502], false);
         await print(rr);
         if (rr.code === 381) {
-            await writeText(c.conn,`AUTHINFO PASS ${c.se.pass}`);
-            await print(readResponse(c.conn, [281, 481, 482, 502], false));
+            await writeText(c,`AUTHINFO PASS ${c.se.pass}`);
+            await print(readResponse(c, [281, 481, 482, 502], false));
         }
     }
+    await nntp_caps(c, false);
 }
 
 export async function nntp_caps(c: NNTPClient, echo: boolean = true) {
-    await writeText(c.conn,'CAPABILITIES');
-    const r = await readResponse(c.conn, [101], true);
+    await writeText(c,'CAPABILITIES');
+    const r = await readResponse(c, [101], true);
     if (echo) await print(r);
-    const x = de.decode(r.data);
+    const x = to_utf8(r.data!);
     if (x.indexOf('COMPRESS DEFLATE') >= 0) {
-        c.compressionType = COMPRESSION_COMPRESS_DEFLATE;
+        c.supportedCompressionType = COMPRESSION_COMPRESS_DEFLATE;
     }
     else if (x.indexOf('XFEATURE-COMPRESS GZIP TERMINATOR') >= 0) {
-        c.compressionType = COMPRESSION_XFEATURE_COMPRESSION_GZIP_TERMINATOR;
+        c.supportedCompressionType = COMPRESSION_XFEATURE_COMPRESSION_GZIP_TERMINATOR;
     }
     else if (x.indexOf('XZVER') >= 0) {
-        c.compressionType = COMPRESSION_ASTRAWEB_XZ;
+        c.supportedCompressionType = COMPRESSION_XZVER;
     }
     else {
-        c.compressionType = COMPRESSION_NONE;
+        c.supportedCompressionType = COMPRESSION_NONE;
     }
 }
 
 export async function nntp_quit(c: NNTPClient) {
-    await writeText(c.conn,'QUIT');
-    await print(readResponse(c.conn, [205], false));
+    await writeText(c,'QUIT');
+    await print(readResponse(c, [205], false));
 
     await c.conn.close();
 }
 
 export async function nntp_date(c: NNTPClient) {
-    await writeText(c.conn,'DATE');
-    await print(readResponse(c.conn, [111], false));
+    await writeText(c,'DATE');
+    await print(readResponse(c, [111], false));
 }
 
 function to_mb(n: number) {
@@ -183,8 +189,8 @@ function to_mb(n: number) {
 }
 
 export async function nntp_group(c: NNTPClient, g: string) {
-    await writeText(c.conn,`GROUP ${g}`);
-    const r = await readResponse(c.conn, [211,411], false);
+    await writeText(c,`GROUP ${g}`);
+    const r = await readResponse(c, [211,411], false);
     await print(r);
     const xs = r.message.split(' ');
 
@@ -195,24 +201,24 @@ export async function nntp_group(c: NNTPClient, g: string) {
         low: Number(xs[1]),
         high: Number(xs[2]),
     };
-    console.log(`Estimated group header size: ${to_mb(gi.count*300)}-${to_mb(gi.count*500)}MB`);
+    console.log(`Estimated uncompressed group header size: ${to_mb(gi.count*300)}-${to_mb(gi.count*500)}MB`);
     return gi;
 }
 
 export async function nntp_get(c: NNTPClient, cmd: string, code: number, isMultiline: boolean, idn: string) {
     let r;
     if (idn) {
-        await writeText(c.conn,`${cmd} ${idn}`);
+        await writeText(c,`${cmd} ${idn}`);
         if (idn[0] === '<') {
-            r = readResponse(c.conn, [code,430], isMultiline);
+            r = readResponse(c, [code,430], isMultiline);
         }
         else {
-            r = readResponse(c.conn, [code,412,423], isMultiline);
+            r = readResponse(c, [code,412,423], isMultiline);
         }
     }
     else {
-        await writeText(c.conn,`${cmd}`);
-        r = readResponse(c.conn, [code,412,420], isMultiline);
+        await writeText(c,`${cmd}`);
+        r = readResponse(c, [code,412,420], isMultiline);
     }
     await print(r);
     return r;
@@ -234,55 +240,52 @@ export async function nntp_article(c: NNTPClient, idn: string) {
 }
 
 export async function nntp_compress_deflate(c: NNTPClient) {
-    await writeText(c.conn,'COMPRESS DEFLATE');
-    await print(readResponse(c.conn, [206, 403, 502], false));
+    await writeText(c,'COMPRESS DEFLATE');
+    await print(readResponse(c, [206, 403, 502], false));
 }
 
 export async function nntp_xfeature_compress_gzip(c: NNTPClient) {
-    await writeText(c.conn,'XFEATURE COMPRESS GZIP TERMINATOR');
-    await print(readResponse(c.conn, [290], false));
+    await writeText(c,'XFEATURE COMPRESS GZIP TERMINATOR');
+    await print(readResponse(c, [290], false));
 }
 
 export async function nntp_xzver(c: NNTPClient, n: string) {
     await nntp_xover(c, n);
 }
 
-async function nntp_activate_compression(c: NNTPClient) {
-    if (!c.compressionIsActive) {
-        if (c.compressionType === COMPRESSION_COMPRESS_DEFLATE) {
-            await nntp_compress_deflate(c);
-            c.compressionIsActive = true;
-        }
-        else if (c.compressionType === COMPRESSION_XFEATURE_COMPRESSION_GZIP_TERMINATOR) {
-            await nntp_xfeature_compress_gzip(c);
-            c.compressionIsActive = true;
-        }
-        else {
-            // nothing
-        }
+export async function nntp_activate_compression(c: NNTPClient) {
+    if (c.supportedCompressionType === COMPRESSION_COMPRESS_DEFLATE && c.activeCompressionType != c.supportedCompressionType) {
+        await nntp_compress_deflate(c);
+        c.activeCompressionType = c.supportedCompressionType;
     }
 }
 
 export async function nntp_xover(c: NNTPClient, n: string) {
-    await nntp_activate_compression(c);
-    if (c.compressionIsActive) {
-        await writeText(c.conn,`XOVER ${n}`);
-        const df = await readResponse(c.conn, [224,412,420,502], true, c.compressionIsActive);
-        if (df.data) {
-            if (df.data.length > 1000) {
-                writeFile(`./.cthulhu/headers/${c.group}/${c.se.url}/data.txt`, df.data);
-            }
-            else {
-                await print(df);
-            }
+    let cmd;
+    switch (c.supportedCompressionType) {
+        case COMPRESSION_NONE:
+        case COMPRESSION_COMPRESS_DEFLATE: {
+            await nntp_activate_compression(c);
+            cmd = 'XOVER';
+            break;
+        }
+        case COMPRESSION_XFEATURE_COMPRESSION_GZIP_TERMINATOR: {
+            await nntp_xfeature_compress_gzip(c);
+            cmd = 'XOVER';
+            break;
+        }
+        case COMPRESSION_XZVER: {
+            cmd = 'XZVER';
+            break;
+        }
+        default: {
+            throw new Error();
         }
     }
-    else {
-        await writeText(c.conn,`XZVER ${n}`);
-        const df = await readResponse(c.conn, [224,412,420,502], true, true);
-        if (df.data) {
-            writeFile(`./.cthulhu/headers/${c.group}/${c.se.url}/data.txt`, df.data);
-        }
+    await writeText(c,`${cmd} ${n}`);
+    const df = await readResponse(c, [224,412,420,502], true);
+    if (df.data) {
+        writeFile(`./.cthulhu/headers/${c.group}/${c.se.url}/data.txt`, df.data);
     }
 }
 
@@ -290,15 +293,14 @@ export async function nntp_connect(se: ServerEntry): Promise<NNTPClient> {
     const isSecureConnection = !![443, 563].filter(x => x === se.port).length;
     const fn_connect =  isSecureConnection ? Deno.connectTls : Deno.connect;
     const conn = await fn_connect({ hostname: se.url, port: se.port });
-    await print(readResponse(conn, [200, 201, 400, 502], false));
     const c = {
         conn: conn,
         se: se,
         isSecureConnection: isSecureConnection,
-        compressionType: COMPRESSION_NONE,
+        supportedCompressionType: COMPRESSION_NONE,
+        activeCompressionType: COMPRESSION_NONE,
         compressionIsActive: false,
     };
-    await nntp_caps(c, false);
+    await print(readResponse(c, [200, 201, 400, 502], false));
     return c;
 }
-
