@@ -14,9 +14,15 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  **/
-import {to_utf8, from_utf8, writeFile, dump_hex_16} from "./util/io.ts";
+import {to_utf8, from_utf8, writeFile, dump_hex_16, dump_hex, debug_print} from "./util/io.ts";
 import {yenc_decode} from "./util/yenc.ts";
-import {zlib_deflate, zlib_inflate} from "./util/deflate.ts";
+import {
+    zlib_deflate,
+    zlib_inflate,
+    zlib_raw_inflate_init,
+    zlib_raw_inflate_process,
+    zlib_raw_inflate_term
+} from "./util/deflate.ts";
 import {ServerEntry} from "./util/config.ts";
 
 interface NNTPResponse {
@@ -32,57 +38,78 @@ interface GroupInfo {
     high: number,
 }
 
-async function readResponse(c: NNTPClient, codes: number[], isMultiline: boolean): Promise<NNTPResponse> {
-    const is_xz = c.activeCompressionType === COMPRESSION_XZVER;
-    const is_deflate = c.activeCompressionType === COMPRESSION_COMPRESS_DEFLATE;
-    if (is_xz) await writeText(c, 'DATE');
+async function readCompressedResponse(c: NNTPClient, codes: number[], isMultiline: boolean): Promise<Uint8Array> {
+    const xp = zlib_raw_inflate_init();
+
     const p = new Uint8Array(1024*16);
-    let xs = new Uint8Array(p.byteLength*4);
-    let n = 0;
     for (;;) {
-        const nn = await c.conn.read(p);
-        if (!nn) break;
-        if (n+nn >= xs.byteLength) {
-            const ys = xs;
-            xs = new Uint8Array(xs.byteLength*2)
-            xs.set(ys, 0);
-        }
-        xs.set(p.subarray(0, nn), n);
-        n += nn;
+        let nn = await c.conn.read(p);
+        debug_print(`compressed-nn: ${nn}`);
+        dump_hex(p.subarray(0, nn || 0));
+        nn = nn || 0;
+        zlib_raw_inflate_process(xp, p.slice(0, nn));
+        if (xp.eos) break;
+    }
+    let xs =  zlib_raw_inflate_term(xp);
+    dump_hex(xs);
+    if (!verifyTail(xs, xs.length, isMultiline)) {
+        const ys = await readCompressedResponse(c, codes, false);
+        const zs = new Uint8Array(xs.length+(await ys).length);
+        zs.set(xs);
+        zs.set(ys);
+        xs = zs;
+    }
+    xs = xs.subarray(0, isMultiline ? xs.length - 5 : xs.length - 2);
+    dump_hex(xs);
+    debug_print(to_utf8(xs));
+    return xs;
+}
 
-        const c0 = xs[n-1];
-        const c1 = xs[n-2];
-        const c2 = xs[n-3];
-        const c3 = xs[n-4];
-        const c4 = xs[n-5];
+function verifyTail(xs: Uint8Array, n: number, isMultiline: boolean) {
+    const c0 = xs[n-1];
+    const c1 = xs[n-2];
+    const c2 = xs[n-3];
+    const c3 = xs[n-4];
+    const c4 = xs[n-5];
 
-        const is_crlf = c1 === 0x0D && c0 === 0x0A;
-        if (is_crlf) {
-            if (!isMultiline) break;
-            if (c2 === 0x2E && c3 === 0x0A && c4 === 0x0D) {
-                n -= 5;
+    debug_print(`${c0}, ${c1}, ${c2}, ${c3}, ${c4}`);
+    const is_crlf = c0 === 0x0A && c1 === 0x0D;
+    return isMultiline ? is_crlf && c2 === 0x2E && c3 === 0x0A && c4 === 0x0D : is_crlf;
+}
+
+async function readResponse(c: NNTPClient, codes: number[], isMultiline: boolean): Promise<NNTPResponse> {
+    const is_deflate = c.activeCompressionType === COMPRESSION_COMPRESS_DEFLATE;
+    const is_gzip = c.activeCompressionType === COMPRESSION_XFEATURE_COMPRESSION_GZIP_TERMINATOR;
+    let xs;
+    if (is_deflate || is_gzip) {
+        xs = await readCompressedResponse(c, codes, isMultiline);
+    }
+    else {
+        const p = new Uint8Array(1024*16);
+        xs = new Uint8Array(p.byteLength*4);
+        let n = 0;
+        for (;;) {
+            const nn = await c.conn.read(p);
+            if (!nn) break;
+            if (n+nn >= xs.byteLength) {
+                const ys = xs;
+                xs = new Uint8Array(xs.byteLength*2)
+                xs.set(ys, 0);
+            }
+            xs.set(p.subarray(0, nn), n);
+            n += nn;
+
+            debug_print(`nn: ${nn}`);
+
+            if (verifyTail(xs, n, isMultiline)) {
+                xs = xs.subarray(0, isMultiline ? n - 5 : n);
                 break;
             }
-            if (is_xz) {
-                const ys = xs.subarray(n-20, n);
-                const a0 = ys[0];
-                const a1 = ys[1];
-                const a2 = ys[2];
-                const a3 = ys[3];
-                if (a0 === 0x31 && a1 === 0x31 && a2 === 0x31 && a3 === 0x20) {
-                    n -= 20;
-                    break;
-                }
-            }
         }
     }
-    if (n === 0) throw new Error('cthulhu err: Connection closed by server');
-    xs = xs.subarray(0, n);
 
-    if (c.activeCompressionType) {
-        xs = zlib_inflate(xs);
-    }
-    const a = xs.indexOf(0x0D);
+    // get first line of multiline response
+    let a = xs.indexOf(0x0D);
     const x = to_utf8(xs.subarray(0, a));
     if (isMultiline && xs.byteLength <= a+2) throw new Error(`${xs.byteLength}:${x}`);
     xs = xs.subarray(a+2);
@@ -95,18 +122,6 @@ async function readResponse(c: NNTPClient, codes: number[], isMultiline: boolean
     if (!codes.filter(x => x === v.code).length) throw new Error(`Expected: one of ${codes.join(',')}. Found: ${v.code} (${x})`);
     if (!isMultiline) return v;
     if (!v.data) throw new Error();
-
-    if (is_xz) {
-        if (v.data[0] === 0x3D && v.data[1] === 0x79) {
-            v.data = yenc_decode(v.data);
-        }
-        try {
-            v.data = zlib_inflate(v.data);
-        }
-        catch (e) {
-            console.log('>> err::inflate');
-        }
-    }
     return v;
 }
 
@@ -173,8 +188,8 @@ export async function nntp_caps(c: NNTPClient, echo: boolean = true) {
 }
 
 export async function nntp_quit(c: NNTPClient) {
-    await writeText(c,'QUIT');
-    await print(readResponse(c, [205], false));
+    //await writeText(c,'QUIT');
+    //await print(readResponse(c, [205], false));
 
     await c.conn.close();
 }
@@ -270,12 +285,14 @@ export async function nntp_xover(c: NNTPClient, n: string) {
             break;
         }
         case COMPRESSION_XFEATURE_COMPRESSION_GZIP_TERMINATOR: {
-            await nntp_xfeature_compress_gzip(c);
-            cmd = 'XOVER';
+            //await nntp_xfeature_compress_gzip(c);
+            //cmd = 'XOVER';
+            throw new Error('not implemented');
             break;
         }
         case COMPRESSION_XZVER: {
-            cmd = 'XZVER';
+            // cmd = 'XZVER';
+            throw new Error('not implemented');
             break;
         }
         default: {

@@ -79,7 +79,9 @@ export function exists(p: string) {
     }
 }
 
+const Debug = true;
 export function dump_hex(p: Uint8Array) {
+    if (!Debug) return;
     const xs = [];
     let ys = [];
     for (let i = 0; i < p.byteLength; i++) {
@@ -97,6 +99,7 @@ export function dump_hex(p: Uint8Array) {
 }
 
 export function dump_hex_16(p: Uint8Array) {
+    if (!Debug) return;
     if (p.byteLength <= 32) {
         dump_hex(p);
     }
@@ -104,6 +107,11 @@ export function dump_hex_16(p: Uint8Array) {
         dump_hex(p.subarray(0, 16));
         dump_hex(p.subarray(p.byteLength-16));
     }
+}
+
+export function debug_print(x: string) {
+    if (!Debug) return;
+    console.log(x);
 }
 
 const de = new TextDecoder("utf-8");
