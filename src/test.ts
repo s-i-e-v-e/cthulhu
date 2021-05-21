@@ -40,7 +40,7 @@ export async function test() {
 
     xml_test();
 
-    await nzb_test();
+    await nzb_test(se);
     await nntp_test_groups(se);
     await nntp_test_article(se);
     await nntp_test_body(se);

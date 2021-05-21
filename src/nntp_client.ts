@@ -269,8 +269,16 @@ export async function nntp_xzver(c: NNTPClient, n: string) {
 }
 
 export async function nntp_activate_compression(c: NNTPClient) {
-    if (c.supportedCompressionType === COMPRESSION_COMPRESS_DEFLATE && c.activeCompressionType != c.supportedCompressionType) {
-        await nntp_compress_deflate(c);
+    if (c.activeCompressionType != c.supportedCompressionType) {
+        if (c.supportedCompressionType === COMPRESSION_COMPRESS_DEFLATE) {
+            await nntp_compress_deflate(c);
+        }
+        else if (c.supportedCompressionType === COMPRESSION_XFEATURE_COMPRESSION_GZIP_TERMINATOR) {
+            await nntp_xfeature_compress_gzip(c);
+        }
+        else {
+            throw new Error();
+        }
         c.activeCompressionType = c.supportedCompressionType;
     }
 }
@@ -285,9 +293,8 @@ export async function nntp_xover(c: NNTPClient, n: string) {
             break;
         }
         case COMPRESSION_XFEATURE_COMPRESSION_GZIP_TERMINATOR: {
-            //await nntp_xfeature_compress_gzip(c);
-            //cmd = 'XOVER';
-            throw new Error('not implemented');
+            await nntp_activate_compression(c);
+            cmd = 'XOVER';
             break;
         }
         case COMPRESSION_XZVER: {
@@ -300,6 +307,14 @@ export async function nntp_xover(c: NNTPClient, n: string) {
         }
     }
     await writeText(c,`${cmd} ${n}`);
+    const df = await readResponse(c, [224,412,420,502], true);
+    if (df.data) {
+        writeFile(`./.cthulhu/headers/${c.group}/${c.se.url}/data.txt`, df.data);
+    }
+}
+
+export async function nntp_over(c: NNTPClient, n: string) {
+    await writeText(c,`XOVER ${n}`);
     const df = await readResponse(c, [224,412,420,502], true);
     if (df.data) {
         writeFile(`./.cthulhu/headers/${c.group}/${c.se.url}/data.txt`, df.data);
