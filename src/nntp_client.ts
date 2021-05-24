@@ -38,20 +38,36 @@ interface GroupInfo {
     high: number,
 }
 
+function debug_output(c: NNTPClient, p: Uint8Array, total_count: number) {
+    // debug_print(`>> total: ${total_count}, current: ${p.length}`);
+    // dump_hex(p);
+    // debug_print(`<<`);
+    // writeFile(`./.cthulhu/debug-compressed/${c.group}/${c.se.url}/${Date.now()}.hex`, p);
+}
+
 async function readCompressedResponse(c: NNTPClient, codes: number[], isMultiline: boolean): Promise<Uint8Array> {
     const xp = zlib_raw_inflate_init();
 
     const p = new Uint8Array(1024*16);
+    let is_first = true;
     for (;;) {
         let nn = await c.conn.read(p);
-        debug_print(`compressed-nn: ${nn}`);
-        dump_hex(p.subarray(0, nn || 0));
         nn = nn || 0;
+        debug_output(c, p.subarray(0, nn), -1);
+
+        if (is_first) {
+            if (p[0] === 0x78) {
+                // strip gzip header
+                p.set(p.subarray(2), 0);
+                nn -= 2;
+            }
+            is_first = false;
+        }
         zlib_raw_inflate_process(xp, p.slice(0, nn));
         if (xp.eos) break;
     }
     let xs =  zlib_raw_inflate_term(xp);
-    dump_hex(xs);
+
     if (!verifyTail(xs, xs.length, isMultiline)) {
         const ys = await readCompressedResponse(c, codes, false);
         const zs = new Uint8Array(xs.length+(await ys).length);
@@ -60,8 +76,6 @@ async function readCompressedResponse(c: NNTPClient, codes: number[], isMultilin
         xs = zs;
     }
     xs = xs.subarray(0, isMultiline ? xs.length - 5 : xs.length - 2);
-    dump_hex(xs);
-    debug_print(to_utf8(xs));
     return xs;
 }
 
@@ -72,40 +86,51 @@ function verifyTail(xs: Uint8Array, n: number, isMultiline: boolean) {
     const c3 = xs[n-4];
     const c4 = xs[n-5];
 
-    debug_print(`${c0}, ${c1}, ${c2}, ${c3}, ${c4}`);
     const is_crlf = c0 === 0x0A && c1 === 0x0D;
     return isMultiline ? is_crlf && c2 === 0x2E && c3 === 0x0A && c4 === 0x0D : is_crlf;
+}
+
+async function readTextResponse(c: NNTPClient, codes: number[], isMultiline: boolean): Promise<Uint8Array> {
+    const p = new Uint8Array(1024*16);
+    let xs = new Uint8Array(p.byteLength*4);
+    let n = 0;
+    for (;;) {
+        const nn = await c.conn.read(p);
+        if (!nn) break;
+        if (n+nn >= xs.byteLength) {
+            const ys = xs;
+            xs = new Uint8Array(xs.byteLength*2)
+            xs.set(ys, 0);
+        }
+        xs.set(p.subarray(0, nn), n);
+        n += nn;
+
+        debug_output(c, p.subarray(0, nn), n);
+
+        if (verifyTail(xs, n, isMultiline)) {
+            xs = xs.subarray(0, isMultiline ? n - 5 : n);
+            break;
+        }
+    }
+    return xs;
 }
 
 async function readResponse(c: NNTPClient, codes: number[], isMultiline: boolean): Promise<NNTPResponse> {
     const is_deflate = c.activeCompressionType === COMPRESSION_COMPRESS_DEFLATE;
     const is_gzip = c.activeCompressionType === COMPRESSION_XFEATURE_COMPRESSION_GZIP_TERMINATOR;
     let xs;
-    if (is_deflate || is_gzip) {
+    if (is_deflate) {
         xs = await readCompressedResponse(c, codes, isMultiline);
     }
+    else if (is_gzip) {
+        const a = await readTextResponse(c, codes, false);
+        const b = await readCompressedResponse(c, codes, isMultiline);
+        xs = new Uint8Array(a.length+b.length);
+        xs.set(a, 0);
+        xs.set(b, a.length);
+    }
     else {
-        const p = new Uint8Array(1024*16);
-        xs = new Uint8Array(p.byteLength*4);
-        let n = 0;
-        for (;;) {
-            const nn = await c.conn.read(p);
-            if (!nn) break;
-            if (n+nn >= xs.byteLength) {
-                const ys = xs;
-                xs = new Uint8Array(xs.byteLength*2)
-                xs.set(ys, 0);
-            }
-            xs.set(p.subarray(0, nn), n);
-            n += nn;
-
-            debug_print(`nn: ${nn}`);
-
-            if (verifyTail(xs, n, isMultiline)) {
-                xs = xs.subarray(0, isMultiline ? n - 5 : n);
-                break;
-            }
-        }
+        xs = await readTextResponse(c, codes, isMultiline);
     }
 
     // get first line of multiline response
@@ -127,6 +152,7 @@ async function readResponse(c: NNTPClient, codes: number[], isMultiline: boolean
 
 async function writeText(c: NNTPClient, x: string) {
     let y = from_utf8(`${x}\r\n`);
+    console.log(`cmd: ${x}`);
     y = c.activeCompressionType === COMPRESSION_COMPRESS_DEFLATE ? zlib_deflate(y) : y;
     const n = await c.conn.write(y);
     if (n !== y.byteLength) throw new Error();
@@ -254,12 +280,12 @@ export async function nntp_article(c: NNTPClient, idn: string) {
     return nntp_get(c, 'ARTICLE', 220, true, idn);
 }
 
-export async function nntp_compress_deflate(c: NNTPClient) {
+async function nntp_compress_deflate(c: NNTPClient) {
     await writeText(c,'COMPRESS DEFLATE');
     await print(readResponse(c, [206, 403, 502], false));
 }
 
-export async function nntp_xfeature_compress_gzip(c: NNTPClient) {
+async function nntp_xfeature_compress_gzip(c: NNTPClient) {
     await writeText(c,'XFEATURE COMPRESS GZIP TERMINATOR');
     await print(readResponse(c, [290], false));
 }
@@ -268,7 +294,7 @@ export async function nntp_xzver(c: NNTPClient, n: string) {
     await nntp_xover(c, n);
 }
 
-export async function nntp_activate_compression(c: NNTPClient) {
+async function nntp_activate_compression(c: NNTPClient) {
     if (c.activeCompressionType != c.supportedCompressionType) {
         if (c.supportedCompressionType === COMPRESSION_COMPRESS_DEFLATE) {
             await nntp_compress_deflate(c);
@@ -309,7 +335,7 @@ export async function nntp_xover(c: NNTPClient, n: string) {
     await writeText(c,`${cmd} ${n}`);
     const df = await readResponse(c, [224,412,420,502], true);
     if (df.data) {
-        writeFile(`./.cthulhu/headers/${c.group}/${c.se.url}/data.txt`, df.data);
+        writeFile(`./.cthulhu/headers/${c.group}/${c.se.url}/${Date.now()}.data.txt`, df.data);
     }
 }
 
@@ -317,7 +343,7 @@ export async function nntp_over(c: NNTPClient, n: string) {
     await writeText(c,`XOVER ${n}`);
     const df = await readResponse(c, [224,412,420,502], true);
     if (df.data) {
-        writeFile(`./.cthulhu/headers/${c.group}/${c.se.url}/data.txt`, df.data);
+        writeFile(`./.cthulhu/headers/${c.group}/${c.se.url}/${Date.now()}.data.txt`, df.data);
     }
 }
 

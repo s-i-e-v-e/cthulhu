@@ -23,9 +23,9 @@ import {
     nntp_date,
     nntp_group,
     nntp_quit,
+    nntp_over,
     nntp_xover,
     nntp_xzver,
-    nntp_xfeature_compress_gzip, nntp_activate_compression
 } from "./nntp_client.ts";
 import {nzb_stat} from "./nzb.ts";
 import {xml_parse} from "./util/xml.ts";
@@ -42,15 +42,13 @@ export async function test() {
 
     await nzb_test(se);
     await nntp_test_groups(se);
-    await nntp_test_article(se);
-    await nntp_test_body(se);
+    await nntp_test_over(se, g);
     await nntp_test_xover(se, g);
     await nntp_test_xzver(se, g);
-    await nntp_test_xfeature_compress_gzip(se, g);
     await nntp_test_caps(cfg.servers);
-    await nntp_test_xover(se, g);
-    await nntp_test_compress(se);
     await nntp_test_response(cfg.servers);
+    await nntp_test_article(se);
+    await nntp_test_body(se);
 }
 
 export function xml_test() {
@@ -128,12 +126,12 @@ async function nntp_test_body(se: ServerEntry) {
     await nntp_quit(c);
 }
 
-async function nntp_test_xfeature_compress_gzip(se: ServerEntry, g: string) {
+async function nntp_test_over(se: ServerEntry, g: string) {
     const c = await nntp_connect(se);
     await nntp_auth(c);
-    await nntp_xfeature_compress_gzip(c);
     const gi = await nntp_group(c, g);
-    await nntp_xover(c, `${gi.low}-${gi.high}`);
+    const x = gi.high - 100;
+    await nntp_over(c, `${gi.low > x ? gi.low : x}-${gi.high}`);
     await nntp_quit(c);
 }
 
@@ -150,7 +148,8 @@ async function nntp_test_xzver(se: ServerEntry, g: string) {
     const c = await nntp_connect(se);
     await nntp_auth(c);
     const gi = await nntp_group(c, g);
-    await nntp_xzver(c, `${gi.low}-${gi.high}`);
+    const x = gi.high - 100;
+    await nntp_xzver(c, `${gi.low > x ? gi.low : x}-${gi.high}`);
     await nntp_quit(c);
 }
 
@@ -160,12 +159,5 @@ async function nntp_test_groups(se: ServerEntry) {
     for (const g of GROUPS) {
         await nntp_group(c, g);
     }
-    await nntp_quit(c);
-}
-
-async function nntp_test_compress(se: ServerEntry) {
-    const c = await nntp_connect(se);
-    await nntp_auth(c);
-    await nntp_activate_compression(c);
     await nntp_quit(c);
 }
